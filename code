@@ -1,0 +1,183 @@
+<!DOCTYPE html>
+<html lang="vi">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Hệ thống Sao Thủy 3D - Điều khiển bằng cử chỉ</title>
+    <style>
+        body { margin: 0; overflow: hidden; background-color: #050505; font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif; }
+        #ui-container {
+            position: absolute; top: 20px; left: 20px; color: white; z-index: 10;
+            background: rgba(0, 0, 0, 0.7); padding: 20px; border-radius: 15px;
+            border: 1px solid rgba(255, 255, 255, 0.1); backdrop-filter: blur(10px);
+        }
+        .status-dot { height: 10px; width: 10px; background-color: #00ff00; border-radius: 50%; display: inline-block; margin-right: 5px; }
+        #video-preview {
+            position: absolute; bottom: 20px; right: 20px; width: 240px; height: 180px;
+            border-radius: 12px; border: 2px solid #4facfe; transform: scaleX(-1);
+            background: #000; box-shadow: 0 10px 30px rgba(0,0,0,0.5);
+        }
+        .instruction { font-size: 0.9em; color: #ccc; margin-top: 10px; }
+        b { color: #4facfe; }
+    </style>
+</head>
+<body>
+
+<div id="ui-container">
+    <h2 style="margin: 0 0 10px 0;">Mercury 3D Controller</h2>
+    <div><span class="status-dot"></span> Camera: <span id="cam-status">Đang tải AI...</span></div>
+    <div class="instruction">
+        • <b>Mở/Chụm đầu ngón tay:</b> Thu phóng (Zoom)<br>
+        • <b>Chỉ ngón trỏ & Xoay:</b> Điều khiển xoay hành tinh
+    </div>
+</div>
+
+<video id="webcam" style="display:none;" autoplay playsinline></video>
+<canvas id="video-preview"></canvas>
+
+<script type="importmap">
+    {
+        "imports": {
+            "three": "https://unpkg.com/three@0.160.0/build/three.module.js",
+            "three/addons/": "https://unpkg.com/three@0.160.0/examples/jsm/"
+        }
+    }
+</script>
+
+<script type="module">
+    import * as THREE from 'three';
+    import { HandLandmarker, FilesetResolver } from "https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.0";
+
+    // --- CẤU HÌNH THREE.JS ---
+    const scene = new THREE.Scene();
+    const camera = new THREE.PerspectiveCamera(75, window.innerWidth / window.innerHeight, 0.1, 1000);
+    const renderer = new THREE.WebGLRenderer({ antialias: true, alpha: true });
+    renderer.setSize(window.innerWidth, window.innerHeight);
+    renderer.setPixelRatio(window.devicePixelRatio);
+    document.body.appendChild(renderer.domElement);
+
+    // Ánh sáng
+    const ambientLight = new THREE.AmbientLight(0xffffff, 0.4);
+    scene.add(ambientLight);
+    const sunLight = new THREE.DirectionalLight(0xffffff, 2.5);
+    sunLight.position.set(5, 3, 5);
+    scene.add(sunLight);
+
+    // Tạo Sao Thủy (Sử dụng texture chất lượng cao)
+    const geo = new THREE.SphereGeometry(1.5, 64, 64);
+    const loader = new THREE.TextureLoader();
+    const mercuryTex = loader.load('https://vyle31251022442-hub.github.io/texture-the-mercury-planet/2k_mercury.jpg'); // Bạn có thể thay bằng link file Sao Thủy của bạn
+    const mercuryBump = loader.load('https://vyle31251022442-hub.github.io/texture-the-mercury-planet/2k_mercury.jpg');
+    
+    const material = new THREE.MeshStandardMaterial({ 
+        map: mercuryTex,
+        bumpMap: mercuryBump,
+        bumpScale: 0.05,
+        roughness: 0.8 
+    });
+    const mercury = new THREE.Mesh(geo, material);
+    scene.add(mercury);
+
+    // Nền sao trời
+    const starGeo = new THREE.BufferGeometry();
+    const starVerts = [];
+    for(let i=0; i<6000; i++) {
+        starVerts.push((Math.random()-0.5)*2000, (Math.random()-0.5)*2000, (Math.random()-0.5)*2000);
+    }
+    starGeo.setAttribute('position', new THREE.Float32BufferAttribute(starVerts, 3));
+    const stars = new THREE.Points(starGeo, new THREE.PointsMaterial({color: 0x888888, size: 0.7}));
+    scene.add(stars);
+
+    camera.position.z = 5;
+
+    // --- CẤU HÌNH MEDIAPIPE (AI) ---
+    let handLandmarker;
+    let lastVideoTime = -1;
+    let prevIndexPos = { x: 0, y: 0 };
+    const video = document.getElementById("webcam");
+    const canvasElement = document.getElementById("video-preview");
+    const canvasCtx = canvasElement.getContext("2d");
+
+    async function initAI() {
+        const vision = await FilesetResolver.forVisionTasks("https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.0/wasm");
+        handLandmarker = await HandLandmarker.createFromOptions(vision, {
+            baseOptions: { modelAssetPath: `https://storage.googleapis.com/mediapipe-models/hand_landmarker/hand_landmarker/float16/1/hand_landmarker.task` },
+            runningMode: "VIDEO", numHands: 1
+        });
+        startCamera();
+    }
+
+    async function startCamera() {
+        const constraints = { video: { width: 640, height: 480 } };
+        const stream = await navigator.mediaDevices.getUserMedia(constraints);
+        video.srcObject = stream;
+        video.addEventListener("loadeddata", () => {
+            document.getElementById("cam-status").innerText = "Đang hoạt động";
+            animate();
+        });
+    }
+
+    function animate() {
+        // Xử lý AI nhận diện tay
+        if (video.currentTime !== lastVideoTime) {
+            lastVideoTime = video.currentTime;
+            const results = handLandmarker.detectForVideo(video, performance.now());
+            
+            // Vẽ preview camera
+            canvasCtx.save();
+            canvasCtx.clearRect(0, 0, canvasElement.width, canvasElement.height);
+            canvasCtx.drawImage(video, 0, 0, canvasElement.width, canvasElement.height);
+            
+            if (results.landmarks && results.landmarks.length > 0) {
+                const landmarks = results.landmarks[0];
+                handleGestures(landmarks);
+            }
+            canvasCtx.restore();
+        }
+
+        // Tự xoay nhẹ để tạo cảm giác sống động
+        mercury.rotation.y += 0.002;
+
+        renderer.render(scene, camera);
+        requestAnimationFrame(animate);
+    }
+
+    function handleGestures(points) {
+        // Các điểm mốc ngón tay: 4 (cái), 8 (trỏ), 12 (giữa), 0 (cổ tay)
+        const thumbTip = points[4];
+        const indexTip = points[8];
+        const middleTip = points[12];
+
+        // 1. XỬ LÝ ZOOM (Khoảng cách ngón cái - ngón trỏ)
+        const distance = Math.sqrt(
+            Math.pow(thumbTip.x - indexTip.x, 2) + 
+            Math.pow(thumbTip.y - indexTip.y, 2)
+        );
+        // Map khoảng cách vào scale (0.5 đến 3.0)
+        const scale = THREE.MathUtils.lerp(mercury.scale.x, distance * 8, 0.1);
+        mercury.scale.set(scale, scale, scale);
+
+        // 2. XỬ LÝ XOAY (Kiểm tra ngón trỏ chỉ lên)
+        // Nếu đầu ngón trỏ cao hơn các khớp khác đáng kể
+        if (indexTip.y < points[6].y && indexTip.y < points[12].y) {
+            const dx = indexTip.x - prevIndexPos.x;
+            const dy = indexTip.y - prevIndexPos.y;
+
+            // Xoay theo hướng di chuyển của ngón tay (ngược trục X do camera mirror)
+            mercury.rotation.y -= dx * 10;
+            mercury.rotation.x += dy * 10;
+        }
+        
+        prevIndexPos = { x: indexTip.x, y: indexTip.y };
+    }
+
+    window.addEventListener('resize', () => {
+        camera.aspect = window.innerWidth / window.innerHeight;
+        camera.updateProjectionMatrix();
+        renderer.setSize(window.innerWidth, window.innerHeight);
+    });
+
+    initAI();
+</script>
+</body>
+</html>
